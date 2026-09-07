@@ -127,6 +127,25 @@ class CallViewModel: ObservableObject {
 		if let observer = routeChangeObserver {
 			NotificationCenter.default.removeObserver(observer)
 		}
+		let currentCall = self.currentCall
+		let callDelegate = self.callDelegate
+		let conferenceDelegate = self.conferenceDelegate
+		let waitingForConferenceDelegate = self.waitingForConferenceDelegate
+		DispatchQueue.main.async {
+			self.coreContext.doOnCoreQueue { _ in
+				if let callDelegate = callDelegate, let call = currentCall {
+					call.removeDelegate(delegate: callDelegate)
+				}
+				if let conference = currentCall?.conference {
+					if let conferenceDelegate = conferenceDelegate {
+						conference.removeDelegate(delegate: conferenceDelegate)
+					}
+					if let waitingForConferenceDelegate = waitingForConferenceDelegate {
+						conference.removeDelegate(delegate: waitingForConferenceDelegate)
+					}
+				}
+			}
+		}
 	}
 
 	func isRouteAllowed() -> Bool {
@@ -234,7 +253,11 @@ class CallViewModel: ObservableObject {
 
 		DispatchQueue.main.async {
 			self.displayName = ""
+			let oldModel = self.avatarModel
 			self.avatarModel = nil
+			CoreContext.shared.doOnCoreQueue { _ in
+				_ = oldModel
+			}
 		}
 		
 		coreContext.doOnCoreQueue { core in
@@ -325,7 +348,11 @@ class CallViewModel: ObservableObject {
 					
 					ContactAvatarModel.getAvatarModelFromAddress(address: self.currentCall!.remoteAddress!) { avatarResult in
 						DispatchQueue.main.async {
+							let oldModel = self.avatarModel
 							self.avatarModel = avatarResult
+							CoreContext.shared.doOnCoreQueue { _ in
+								_ = oldModel
+							}
 						}
 					}
 				}
@@ -402,35 +429,38 @@ class CallViewModel: ObservableObject {
 					}
 				}
 				
-				self.callDelegate = CallDelegateStub(onEncryptionChanged: { (_: Call, _: Bool, _: String) in
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        self.updateEncryption(withToast: false)
-                    }
-					if self.currentCall != nil {
-						self.callMediaEncryptionModel.update(call: self.currentCall!)
-					}
-				}, onAuthenticationTokenVerified: { (_, verified: Bool) in
-					Log.warn("[CallViewModel][ZRTPPopup] Notified that authentication token is \(verified ? "verified" : "not verified!")")
-					if verified {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                            self.updateEncryption(withToast: true)
-                            if self.currentCall != nil {
-                                self.callMediaEncryptionModel.update(call: self.currentCall!)
-                            }
-                        }
-					} else {
-                        DispatchQueue.main.async {
-                            self.isNotVerified = true
-                            self.zrtpPopupDisplayed = true
-                        }
-					}
-				}, onStatsUpdated: { (_: Call, stats: CallStats) in
-					DispatchQueue.main.async {
+				self.callDelegate = CallDelegateStub(onEncryptionChanged: { [weak self] (_: Call, _: Bool, _: String) in
+				guard let self = self else { return }
+				DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+					self.updateEncryption(withToast: false)
+				}
+				if self.currentCall != nil {
+					self.callMediaEncryptionModel.update(call: self.currentCall!)
+				}
+			}, onAuthenticationTokenVerified: { [weak self] (_, verified: Bool) in
+				guard let self = self else { return }
+				Log.warn("[CallViewModel][ZRTPPopup] Notified that authentication token is \(verified ? "verified" : "not verified!")")
+				if verified {
+					DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+						self.updateEncryption(withToast: true)
 						if self.currentCall != nil {
-							self.callStatsModel.update(call: self.currentCall!, stats: stats)
+							self.callMediaEncryptionModel.update(call: self.currentCall!)
 						}
 					}
-				})
+				} else {
+					DispatchQueue.main.async {
+						self.isNotVerified = true
+						self.zrtpPopupDisplayed = true
+					}
+				}
+			}, onStatsUpdated: { [weak self] (_: Call, stats: CallStats) in
+				guard let self = self else { return }
+				DispatchQueue.main.async {
+					if self.currentCall != nil {
+						self.callStatsModel.update(call: self.currentCall!, stats: stats)
+					}
+				}
+			})
 				self.currentCall!.addDelegate(delegate: self.callDelegate!)
 				self.updateCallQualityIcon()
 			}
@@ -553,7 +583,8 @@ class CallViewModel: ObservableObject {
 	
 	func waitingForCreatedStateConference() {
 		if let conference = self.currentCall?.conference {
-			self.waitingForConferenceDelegate = ConferenceDelegateStub(onStateChanged: { (_: Conference, newState: Conference.State) in
+			self.waitingForConferenceDelegate = ConferenceDelegateStub(onStateChanged: { [weak self] (_: Conference, newState: Conference.State) in
+				guard let self = self else { return }
 				if newState == .Created {
 					DispatchQueue.main.async {
 						self.getConference()
@@ -568,7 +599,8 @@ class CallViewModel: ObservableObject {
 		coreContext.doOnCoreQueue { _ in
 			guard let conference = self.currentCall?.conference else { return }
 			
-			self.conferenceDelegate = ConferenceDelegateStub(onParticipantDeviceAdded: { (conference: Conference, participantDevice: ParticipantDevice) in
+			self.conferenceDelegate = ConferenceDelegateStub(onParticipantDeviceAdded: { [weak self] (conference: Conference, participantDevice: ParticipantDevice) in
+				guard let self = self else { return }
 				if participantDevice.address != nil {
 					var participantListTmp: [ParticipantModel] = []
 					conference.participantDeviceList.forEach({ pDevice in
@@ -648,7 +680,8 @@ class CallViewModel: ObservableObject {
 						self.participantList = participantListTmp
 					}
 				}
-			}, onParticipantDeviceRemoved: { (conference: Conference, participantDevice: ParticipantDevice) in
+			}, onParticipantDeviceRemoved: { [weak self] (conference: Conference, participantDevice: ParticipantDevice) in
+				guard let self = self else { return }
 				if participantDevice.address != nil {
 					var participantListTmp: [ParticipantModel] = []
 					conference.participantDeviceList.forEach({ pDevice in
@@ -679,7 +712,8 @@ class CallViewModel: ObservableObject {
 						}
 					}
 				}
-			}, onParticipantAdminStatusChanged: { (_: Conference, participant: Participant) in
+			}, onParticipantAdminStatusChanged: { [weak self] (_: Conference, participant: Participant) in
+				guard let self = self else { return }
 				let isAdmin = participant.isAdmin
 				if self.myParticipantModel != nil && self.myParticipantModel!.address.clone()!.equal(address2: participant.address!) {
 					DispatchQueue.main.async {
@@ -693,7 +727,8 @@ class CallViewModel: ObservableObject {
 						}
 					}
 				})
-			}, onParticipantDeviceStateChanged: { (_: Conference, device: ParticipantDevice, state: ParticipantDevice.State) in
+			}, onParticipantDeviceStateChanged: { [weak self] (_: Conference, device: ParticipantDevice, state: ParticipantDevice.State) in
+				guard let self = self else { return }
 				Log.info(
 					"[CallViewModel] Participant device \(device.address!.asStringUriOnly()) state changed \(state)"
 				)
@@ -711,7 +746,8 @@ class CallViewModel: ObservableObject {
 						}
 					}
 				})
-			}, onParticipantDeviceScreenSharingChanged: { (_: Conference, device: ParticipantDevice, enabled: Bool) in
+			}, onParticipantDeviceScreenSharingChanged: { [weak self] (_: Conference, device: ParticipantDevice, enabled: Bool) in
+				guard let self = self else { return }
 				self.toggleVideoMode(isAudioOnlyMode: false)
 				
                 let activeSpeakerParticipantTmp = ParticipantModel(
@@ -761,7 +797,8 @@ class CallViewModel: ObservableObject {
                     self.activeSpeakerName = activeSpeakerNameTmp
                     self.participantList = participantListTmp
                 }
-			} , onParticipantDeviceIsSpeakingChanged: { (_: Conference, device: ParticipantDevice, isSpeaking: Bool) in
+			} , onParticipantDeviceIsSpeakingChanged: { [weak self] (_: Conference, device: ParticipantDevice, isSpeaking: Bool) in
+				guard let self = self else { return }
 				let isSpeaking = device.isSpeaking
 				if self.myParticipantModel != nil && self.myParticipantModel!.address.clone()!.equal(address2: device.address!) {
 					DispatchQueue.main.async {
@@ -775,7 +812,8 @@ class CallViewModel: ObservableObject {
 						}
 					}
 				})
-			}, onParticipantDeviceIsMuted: { (_: Conference, device: ParticipantDevice, isMuted: Bool) in
+			}, onParticipantDeviceIsMuted: { [weak self] (_: Conference, device: ParticipantDevice, isMuted: Bool) in
+				guard let self = self else { return }
 				if self.activeSpeakerParticipant != nil && self.activeSpeakerParticipant!.address.equal(address2: device.address!) {
 					DispatchQueue.main.async {
 						self.activeSpeakerParticipant!.isMuted = isMuted
@@ -788,7 +826,8 @@ class CallViewModel: ObservableObject {
 						}
 					}
 				})
-			}, onActiveSpeakerParticipantDevice: { (conference: Conference, participantDevice: ParticipantDevice?) in
+			}, onActiveSpeakerParticipantDevice: { [weak self] (conference: Conference, participantDevice: ParticipantDevice?) in
+				guard let self = self else { return }
 				if participantDevice != nil && participantDevice!.address != nil {
 					let activeSpeakerParticipantBis = self.activeSpeakerParticipant
 					
@@ -1566,7 +1605,8 @@ class CallViewModel: ObservableObject {
 	}
 	
 	func chatRoomAddDelegate(core: Core, chatRoom: ChatRoom) {
-		self.chatRoomDelegate = ChatRoomDelegateStub(onStateChanged: { (chatRoom: ChatRoom, state: ChatRoom.State) in
+		self.chatRoomDelegate = ChatRoomDelegateStub(onStateChanged: { [weak self] (chatRoom: ChatRoom, state: ChatRoom.State) in
+			guard let self = self else { return }
 			let state = chatRoom.state
 			let id = LinphoneUtils.getChatRoomId(room: chatRoom)
 			if state == ChatRoom.State.CreationFailed {
@@ -1578,7 +1618,8 @@ class CallViewModel: ObservableObject {
 					ToastViewModel.shared.show("Failed_to_create_conversation_error")
 				}
 			}
-		}, onConferenceJoined: { (chatRoom: ChatRoom, _: EventLog) in
+		}, onConferenceJoined: { [weak self] (chatRoom: ChatRoom, _: EventLog) in
+			guard let self = self else { return }
 			let state = chatRoom.state
 			let id = LinphoneUtils.getChatRoomId(room: chatRoom)
 			Log.info("\(StartConversationViewModel.TAG) Conversation \(id) \(chatRoom.subject ?? "") state changed: \(state)")
